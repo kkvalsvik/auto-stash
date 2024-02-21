@@ -4,11 +4,18 @@
 import argparse
 import re
 import subprocess
+import sys
 
 parser = argparse.ArgumentParser(description="Smart switch")
 parser.add_argument("branch", help="Switch to a specified branch.")
 args = parser.parse_args()
 
+# Check for untracked files
+status_output = subprocess.check_output(["git", "status", "--porcelain"], text=True)
+untracked_files = [line for line in status_output.splitlines() if line.startswith("??")]
+if untracked_files:
+    print("ERROR: There are untracked files. These should be staged, committed or removed before switching branches.")
+    sys.exit(1)  # Exit the script with an error code
 
 current_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
 
