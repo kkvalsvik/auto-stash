@@ -5,34 +5,57 @@ import argparse
 import re
 import subprocess
 import sys
+import os
 
-parser = argparse.ArgumentParser(description="Smart switch")
-parser.add_argument("branch", help="Switch to a specified branch.")
-args = parser.parse_args()
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Smart switch")
+    parser.add_argument("branch", help="Switch to a specified branch.")
+    parser.add_argument("-f", "--force", action="store_true", help="Force checkout even with untracked files")
+    return parser.parse_args()
 
-# Check for untracked files
-status_output = subprocess.check_output(["git", "status", "--porcelain"], text=True)
-untracked_files = [line for line in status_output.splitlines() if line.startswith("??")]
-if untracked_files:
-    print("ERROR: There are untracked files. These should be staged, committed or removed before switching branches.")
-    sys.exit(1)  # Exit the script with an error code
+def main():
+    args = parse_arguments()
+    
+    # Check for untracked files if not forcing
+    if not args.force:
+        try:
+            status_output = subprocess.check_output(["git", "status", "--porcelain"], text=True)
+            untracked_files = [line for line in status_output.splitlines() if line.startswith("??")]
+            if untracked_files:
+                print("ERROR: There are untracked files. These should be staged, committed or removed before switching branches.")
+                print("Use -f or --force to switch anyway.")
+                sys.exit(1)  # Exit the script with an error code
+        except subprocess.CalledProcessError:
+            print("ERROR: Unable to check git status. Are you in a git repository?")
+            sys.exit(1)
+    
+    try:
+        current_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
+        
+        # Try to stash the current state setting a parseable message with the branch
+        subprocess.check_output(["git", "stash", "--message", f"[smart switch] {current_branch}"], text=True)
+        
+        # Switch
+        subprocess.check_output(["git", "switch", args.branch])
+        
+        # This is the same as args.branch but also expands references like "-"
+        target_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
+        
+        # List stashes to find if there is something to pop
+        stashes_list = subprocess.check_output(["git", "stash", "list"], text=True)
+        stashes = {branch_name: stash_index for (stash_index, branch_name) in re.findall(r"stash@\{(\d+)\}\: .*: \[smart switch\] (.*)", stashes_list)}
+        
+        stash_index = stashes.get(target_branch)
+        
+        if stash_index is not None:
+            subprocess.check_output(["git", "stash", "pop", "--index", stash_index])
+            
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Git command failed with exit code {e.returncode}")
+        print(f"Command: {' '.join(e.cmd)}")
+        if e.output:
+            print(f"Output: {e.output}")
+        sys.exit(1)
 
-current_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
-
-# try to stash the current state setting a parseable message with the branch
-subprocess.check_output(["git", "stash", "--message", f"[smart switch] {current_branch}"], text=True)
-
-# switch
-subprocess.check_output(["git", "switch", args.branch])
-
-# this is the same than args.branch but also expand references like "-"
-target_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
-
-# list stashes to find if there is something to pop
-stashes_list = subprocess.check_output(["git", "stash", "list"], text=True)
-stashes = {branch_name: stash_index for (stash_index, branch_name) in re.findall(r"stash@\{(\d+)\}\: .*: \[smart switch\] (.*)", stashes_list)}
-
-stash_index = stashes.get(target_branch)
-
-if stash_index is not None:
-    subprocess.check_output(["git", "stash", "pop", "--index", stash_index])
+if __name__ == "__main__":
+    main()

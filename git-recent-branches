@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -30,38 +29,80 @@ import re
 import subprocess
 from collections import OrderedDict
 import os
+import sys
 
 # Get the directory of the currently executing script
 dir_path = os.path.dirname(os.path.realpath(__file__))
-# Construct the full path to the second script
+# Construct the full path to the git-sw script
 PATH_TO_GIT_SW = os.path.join(dir_path, "git-sw")
 
+# Improved regex pattern to capture more branch name formats
+# This handles branch names with alphanumeric characters, underscores, slashes, hyphens, and dots
+pattern = re.compile(r"checkout: moving from ([A-Za-z0-9_\/\-\.]+) to")
 
-pattern = re.compile(r"checkout: moving from ([A-Za-z0-9_\/\-]+) to")
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Show and switch to recently used Git branches")
+    parser.add_argument("index", type=int, nargs="?", help="Switch to the branch at this position in the list")
+    parser.add_argument("--limit", "-n", type=int, default=10, help="Show this many recent branches")
+    parser.add_argument("--force", "-f", action="store_true", help="Force branch checkout")
+    return parser.parse_args()
 
-parser = argparse.ArgumentParser(description="Recent branches")
-parser.add_argument("index", type=int, nargs="?", help="Move to the i-th branch in the list")
-parser.add_argument("--limit", "-n", type=int, default=10, help="Show until the n-th branch")
-parser.add_argument("--force", "-f", action="store_true", help="Force checkout")
+def get_recent_branches():
+    try:
+        output = subprocess.check_output(["git", "reflog"], text=True)
+        # Use OrderedDict to keep only the first occurrence of each branch
+        branches = list(OrderedDict.fromkeys(re.findall(pattern, output)).keys())
+        return branches
+    except subprocess.CalledProcessError:
+        print("Error: Unable to get git reflog. Are you in a git repository?", file=sys.stderr)
+        sys.exit(1)
 
-args = parser.parse_args()
+def get_current_branch():
+    try:
+        return subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
+    except subprocess.CalledProcessError:
+        print("Error: Unable to get current branch", file=sys.stderr)
+        sys.exit(1)
 
-output = subprocess.check_output(["git", "reflog"], text=True)
-
-# OrderedList.fromkeys(list).keys() works as a filter of repeated items in list
-# keeping the first occurrence of them. A poor-man sorted set.
-branches = list(OrderedDict.fromkeys(re.findall(pattern, output)).keys())
-
-
-if args.index:
-    use_sw = subprocess.call(["python", PATH_TO_GIT_SW], stderr=subprocess.DEVNULL) == 2 and not args.force
-
-    cmd = ["python", PATH_TO_GIT_SW if use_sw else "switch"]
-    if args.force:
+def switch_to_branch(branch, force=False):
+    # Use the currently running Python interpreter to execute git-sw
+    # This ensures we use the same Python version that's running this script
+    cmd = [sys.executable, PATH_TO_GIT_SW]
+    
+    if force:
         cmd.append("-f")
-    cmd.append(branches[args.index - 1])
-    subprocess.call(cmd)
-else:
-    current = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
-    for i, branch in enumerate(branches[: args.limit], 1):
-        print(f"{i} {'*' if current == branch else '-'} {branch}")
+    
+    cmd.append(branch)
+    
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError:
+        print(f"Error: Failed to switch to branch '{branch}'", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Make sure {PATH_TO_GIT_SW} exists and is executable", file=sys.stderr)
+        sys.exit(1)
+
+def main():
+    args = parse_arguments()
+    branches = get_recent_branches()
+    
+    if not branches:
+        print("No recent branches found in the git reflog", file=sys.stderr)
+        sys.exit(1)
+    
+    if args.index:
+        if args.index < 1 or args.index > len(branches):
+            print(f"Error: Index {args.index} is out of range. Available branches: 1-{len(branches)}", file=sys.stderr)
+            sys.exit(1)
+        
+        branch = branches[args.index - 1]
+        switch_to_branch(branch, args.force)
+    else:
+        current = get_current_branch()
+        for i, branch in enumerate(branches[:args.limit], 1):
+            print(f"{i} {'*' if current == branch else '-'} {branch}")
+
+if __name__ == "__main__":
+    main()
