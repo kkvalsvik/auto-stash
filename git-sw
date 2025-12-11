@@ -10,52 +10,154 @@ import os
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Smart switch")
     parser.add_argument("branch", help="Switch to a specified branch.")
-    parser.add_argument("-f", "--force", action="store_true", help="Force checkout even with untracked files")
+    parser.add_argument("-f", "--force", action="store_true",
+                        help="Force switch even with untracked files")
     return parser.parse_args()
+
+def run_git(args, **kwargs):
+    return subprocess.check_output(["git"] + args, text=True, **kwargs)
+
+def run_git_ok(args):
+    res = subprocess.run(["git"] + args,
+                         text=True,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    return res.returncode == 0
+
+def get_repo_root():
+    try:
+        return run_git(["rev-parse", "--show-toplevel"]).strip()
+    except subprocess.CalledProcessError:
+        print("ERROR: Not a git repository (or unable to find repo root).")
+        sys.exit(1)
+
+def get_active_skipworktree_paths():
+    """
+    Return all paths currently marked with skip-worktree (flag 'S').
+    Equivalent to: git ls-files -v | grep '^S' | cut -c3-
+    """
+    try:
+        output = run_git(["ls-files", "-v"])
+    except subprocess.CalledProcessError:
+        return []
+
+    active = []
+    for line in output.splitlines():
+        if len(line) < 3:
+            continue
+        flag = line[0]
+        if flag != "S":
+            continue
+        path = line[2:]
+        if path:
+            active.append(path)
+    return active
+
+def is_tracked(path):
+    return run_git_ok(["ls-files", "--error-unmatch", path])
+
+def clear_skip_flags(paths):
+    """
+    Temporarily clear skip-worktree bit on given paths.
+    """
+    for p in paths:
+        # Only bother if tracked; ignore errors silently
+        if is_tracked(p):
+            run_git_ok(["update-index", "--no-skip-worktree", p])
+
+def set_skip_flags(paths):
+    """
+    Re-apply skip-worktree bit on given paths (only if tracked).
+    """
+    for p in paths:
+        if is_tracked(p):
+            run_git_ok(["update-index", "--skip-worktree", p])
 
 def main():
     args = parse_arguments()
-    
-    # Check for untracked files if not forcing
+    repo_root = get_repo_root()
+
+    original_cwd = os.getcwd()
+    os.chdir(repo_root)
+
+    # Determine which files are currently skip-worktree
+    active_skip_paths = get_active_skipworktree_paths()
+
+    # Check for untracked files if not forcing (original behavior)
     if not args.force:
         try:
-            status_output = subprocess.check_output(["git", "status", "--porcelain"], text=True)
-            untracked_files = [line for line in status_output.splitlines() if line.startswith("??")]
+            status_output = run_git(["status", "--porcelain"])
+            untracked_files = [
+                line for line in status_output.splitlines()
+                if line.startswith("??")
+            ]
             if untracked_files:
                 print("ERROR: There are untracked files. These should be staged, committed or removed before switching branches.")
                 print("Use -f or --force to switch anyway.")
-                sys.exit(1)  # Exit the script with an error code
+                os.chdir(original_cwd)
+                sys.exit(1)
         except subprocess.CalledProcessError:
             print("ERROR: Unable to check git status. Are you in a git repository?")
+            os.chdir(original_cwd)
             sys.exit(1)
-    
+
     try:
-        current_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
-        
-        # Try to stash the current state setting a parseable message with the branch
-        subprocess.check_output(["git", "stash", "--message", f"[smart switch] {current_branch}"], text=True)
-        
-        # Switch
-        subprocess.check_output(["git", "switch", args.branch])
-        
-        # This is the same as args.branch but also expands references like "-"
-        target_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
-        
-        # List stashes to find if there is something to pop
-        stashes_list = subprocess.check_output(["git", "stash", "list"], text=True)
-        stashes = {branch_name: stash_index for (stash_index, branch_name) in re.findall(r"stash@\{(\d+)\}\: .*: \[smart switch\] (.*)", stashes_list)}
-        
-        stash_index = stashes.get(target_branch)
-        
-        if stash_index is not None:
-            subprocess.check_output(["git", "stash", "pop", "--index", stash_index])
-            
+        current_branch = run_git(["branch", "--show-current"]).strip()
+
+        # 1) Temporarily clear skip-worktree flags so stash sees everything
+        clear_skip_flags(active_skip_paths)
+
+        # 2) Stash current state with parseable message (same as your script)
+        try:
+            run_git(["stash", "--message", f"[smart switch] {current_branch}"])
+        except subprocess.CalledProcessError as e:
+            print(f"WARNING: git stash failed or did nothing: {e}")
+
+        # 3) Switch branch
+        try:
+            run_git(["switch", args.branch])
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: Git switch failed with exit code {e.returncode}")
+            print(f"Command: {' '.join(e.cmd)}")
+            # We are still on the original branch; reapply flags there
+            set_skip_flags(active_skip_paths)
+            os.chdir(original_cwd)
+            sys.exit(1)
+
+        # 4) Identify the actual target branch name
+        target_branch = run_git(["branch", "--show-current"]).strip()
+
+        # 5) Pop corresponding stash (same logic as your original script)
+        try:
+            stashes_list = run_git(["stash", "list"])
+            stashes = {
+                branch_name: stash_index
+                for (stash_index, branch_name) in re.findall(
+                    r"stash@\{(\d+)\}\: .*: \[smart switch\] (.*)",
+                    stashes_list
+                )
+            }
+            stash_index = stashes.get(target_branch)
+            if stash_index is not None:
+                run_git(["stash", "pop", "--index", stash_index])
+        except subprocess.CalledProcessError as e:
+            print(f"WARNING: git stash pop failed with exit code {e.returncode}")
+            print(f"Command: {' '.join(e.cmd)}")
+            if e.output:
+                print(f"Output: {e.output}")
+
+        # 6) Reapply skip-worktree flags on the new branch
+        set_skip_flags(active_skip_paths)
+
     except subprocess.CalledProcessError as e:
         print(f"ERROR: Git command failed with exit code {e.returncode}")
         print(f"Command: {' '.join(e.cmd)}")
         if e.output:
             print(f"Output: {e.output}")
+        os.chdir(original_cwd)
         sys.exit(1)
+    finally:
+        os.chdir(original_cwd)
 
 if __name__ == "__main__":
     main()
